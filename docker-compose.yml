@@ -6,29 +6,24 @@ services:
     image: my-openclaw-env:latest
     container_name: openclaw-env
     hostname: openclaw
-    user: "${NB_UID:-1000}:${NB_GID:-100}"
     environment:
       - JUPYTER_ENABLE_LAB=yes
       - JUPYTER_TOKEN=${JUPYTER_TOKEN:-openclaw}
-      - DISPLAY=${DISPLAY:-:0}
-      - NB_UID=${NB_UID:-1000}
-      - NB_GID=${NB_GID:-100}
+      - OPENCLAW_HOME=/home/jovyan/.openclaw
     ports:
       - "8888:8888"
+      - "18789:18789"
     volumes:
       - ./work:/home/jovyan/work
-      - ./openclaw-src:/home/jovyan/OpenClaw
-      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - openclaw-state:/home/jovyan/.openclaw
     working_dir: /home/jovyan/work
     stdin_open: true
     tty: true
     restart: unless-stopped
-    shm_size: "1gb"
     command:
       - start-notebook.sh
       - --NotebookApp.token=${JUPYTER_TOKEN:-openclaw}
       - --NotebookApp.ip=0.0.0.0
 
 volumes:
-  work:
-  openclaw-src:
+  openclaw-state:
