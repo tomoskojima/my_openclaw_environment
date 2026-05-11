@@ -1,0 +1,6 @@
+.git
+.gitignore
+*.md
+work/
+openclaw-src/
+.env
