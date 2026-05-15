@@ -182,6 +182,8 @@ PATCH="$(jq -n \
             discord: {
                 enabled: true,
                 groupPolicy: "allowlist",
+                token: null,
+                accounts: null,
                 guilds: { ($guild): { channels: $channels } }
             }
         }
