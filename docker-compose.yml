@@ -6,10 +6,13 @@ services:
     image: my-openclaw-env:latest
     container_name: openclaw-env
     hostname: openclaw
+    user: root
     environment:
       - JUPYTER_ENABLE_LAB=yes
       - JUPYTER_TOKEN=${JUPYTER_TOKEN:-openclaw}
       - OPENCLAW_HOME=/home/jovyan/.openclaw
+      - GRANT_SUDO=yes
+      - CHOWN_HOME=yes
     ports:
       - "8888:8888"
       - "18789:18789"
