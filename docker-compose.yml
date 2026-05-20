@@ -24,6 +24,12 @@ services:
     ports:
       - "8888:8888"
       - "18789:18789"
+    devices:
+      - /dev/video0:/dev/video0
+      - /dev/video1:/dev/video1
+      - /dev/media0:/dev/media0
+    group_add:
+      - "${HOST_VIDEO_GID:-44}"
     volumes:
       - ./work:/home/jovyan/work
       - openclaw-state:/home/jovyan/.openclaw

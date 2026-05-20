@@ -19,8 +19,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-dev \
         jq \
         tini \
+        v4l-utils \
+        ffmpeg \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+RUN /opt/conda/bin/pip install --no-cache-dir opencv-python-headless
 
 RUN mamba install --yes -c conda-forge "nodejs>=24" \
     && mamba clean --all -f -y \
@@ -270,6 +274,157 @@ jq -n --arg ws "$WORKSPACE" '{agents:{defaults:{workspace:$ws}}}' \
 SCRIPT
 RUN chmod +x /usr/local/bin/openclaw-apply-workspace.sh
 
+# Bake the "openclaw-camera" tool plugin source into the image. Installed via
+# `openclaw plugins install --link` by the 08- pre-start hook.
+RUN install -d /opt/openclaw-plugins/openclaw-camera
+
+RUN cat > /opt/openclaw-plugins/openclaw-camera/openclaw.plugin.json <<'JSON'
+{
+  "id": "openclaw-camera",
+  "name": "OpenClaw Camera",
+  "description": "Capture a still frame from the host camera (V4L2 / ffmpeg). The image is saved into the shared workspace and the path is returned to the agent so vision-capable models can read it.",
+  "version": "0.1.0",
+  "activation": { "onStartup": true },
+  "contracts": { "tools": ["capture_camera_frame"] },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
+JSON
+
+RUN cat > /opt/openclaw-plugins/openclaw-camera/package.json <<'JSON'
+{
+  "name": "openclaw-plugin-camera",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "main": "./index.js",
+  "files": ["index.js", "openclaw.plugin.json"],
+  "peerDependencies": {
+    "openclaw": ">=2026.5.0"
+  },
+  "openclaw": {
+    "extensions": ["./index.js"]
+  }
+}
+JSON
+
+RUN cat > /opt/openclaw-plugins/openclaw-camera/index.js <<'JS'
+import { spawn } from "node:child_process";
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import { Type } from "typebox";
+import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
+
+const DEFAULT_WORKSPACE = process.env.OPENCLAW_WORKSPACE || "/home/jovyan/work";
+
+function runFfmpeg(device, size, outPath) {
+  return new Promise((resolve, reject) => {
+    const args = [
+      "-nostdin", "-hide_banner", "-loglevel", "error",
+      "-f", "v4l2", "-video_size", size, "-i", device,
+      "-frames", "1", "-y", outPath,
+    ];
+    const proc = spawn("ffmpeg", args, { stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    proc.stderr.on("data", (d) => { stderr += d.toString(); });
+    proc.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`ffmpeg failed (exit ${code}): ${stderr.trim()}`));
+    });
+    proc.on("error", reject);
+  });
+}
+
+export default defineToolPlugin({
+  id: "openclaw-camera",
+  name: "OpenClaw Camera",
+  description: "Capture a still frame from the host camera via ffmpeg.",
+  tools: (tool) => [
+    tool({
+      name: "capture_camera_frame",
+      description:
+        "Capture one frame from the host webcam (V4L2) and save it into the workspace. " +
+        "Returns the absolute and workspace-relative path; vision-capable models can then read the image.",
+      parameters: Type.Object({
+        filename: Type.Optional(
+          Type.String({
+            description:
+              "Output file name inside the workspace. Default: camera_<ISO timestamp>.jpg.",
+          }),
+        ),
+        device: Type.Optional(
+          Type.String({ description: "V4L2 device path. Default: /dev/video0." }),
+        ),
+        resolution: Type.Optional(
+          Type.String({
+            description: "Resolution like 640x480 or 1280x720. Default: 640x480.",
+          }),
+        ),
+      }),
+      execute: async ({ filename, device, resolution }) => {
+        const dev = device ?? "/dev/video0";
+        const size = resolution ?? "640x480";
+        const fname =
+          filename ?? `camera_${new Date().toISOString().replace(/[:.]/g, "-")}.jpg`;
+        const outPath = path.isAbsolute(fname)
+          ? fname
+          : path.join(DEFAULT_WORKSPACE, fname);
+        await fs.mkdir(path.dirname(outPath), { recursive: true });
+        await runFfmpeg(dev, size, outPath);
+        const stat = await fs.stat(outPath);
+        return {
+          path: outPath,
+          relative: path.relative(DEFAULT_WORKSPACE, outPath),
+          bytes: stat.size,
+          device: dev,
+          resolution: size,
+        };
+      },
+    }),
+  ],
+});
+JS
+
+# Ensure the plugin source tree is readable to jovyan (heredocs ran as root).
+RUN chown -R ${NB_UID}:${NB_GID} /opt/openclaw-plugins
+
+# Installer hook: links the baked plugin into openclaw on every container start.
+RUN cat > /usr/local/bin/openclaw-install-camera-plugin.sh <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+
+PLUGIN_SRC="/opt/openclaw-plugins/openclaw-camera"
+PLUGIN_ID="openclaw-camera"
+
+if [[ ! -f "$PLUGIN_SRC/index.js" ]]; then
+    echo "[openclaw] camera plugin source missing at $PLUGIN_SRC; skipping"
+    exit 0
+fi
+
+if ! command -v openclaw >/dev/null 2>&1; then
+    echo "[openclaw] CLI not on PATH; skipping camera plugin install"
+    exit 0
+fi
+
+if openclaw plugins inspect "$PLUGIN_ID" >/dev/null 2>&1; then
+    CURRENT_SRC="$(openclaw plugins inspect "$PLUGIN_ID" 2>/dev/null | awk -F': ' '/^Source path:/ {print $2; exit}')"
+    if [[ "$CURRENT_SRC" == "$PLUGIN_SRC" ]]; then
+        echo "[openclaw] camera plugin already registered from $PLUGIN_SRC"
+        exit 0
+    fi
+fi
+
+echo "[openclaw] linking camera plugin from $PLUGIN_SRC"
+# The plugin spawns ffmpeg via child_process, which trips the unsafe-pattern
+# guard. The plugin source is shipped inside this image (not from the network),
+# so we explicitly bypass the guard.
+openclaw plugins install --link --force --dangerously-force-unsafe-install "$PLUGIN_SRC"
+SCRIPT
+RUN chmod +x /usr/local/bin/openclaw-install-camera-plugin.sh
+
 # Register Jupyter pre-start hooks. Numeric prefixes set execution order:
 #   05-  sync discord plugin to CLI version
 #   06-  apply env-driven Discord allow-list to openclaw.json
@@ -326,6 +481,21 @@ run_as_jovyan /usr/local/bin/openclaw-apply-workspace.sh \
     || echo "[openclaw] workspace apply failed; continuing"
 HOOK
 RUN chmod +x /usr/local/bin/before-notebook.d/07-openclaw-workspace.sh
+
+RUN cat > /usr/local/bin/before-notebook.d/08-openclaw-camera-plugin.sh <<'HOOK'
+#!/usr/bin/env bash
+# Link the baked openclaw-camera plugin into the agent's extensions dir.
+run_as_jovyan() {
+    if [[ "$(id -u)" == "0" ]]; then
+        runuser -u jovyan --preserve-environment -- "$@"
+    else
+        "$@"
+    fi
+}
+run_as_jovyan /usr/local/bin/openclaw-install-camera-plugin.sh \
+    || echo "[openclaw] camera plugin install failed; continuing"
+HOOK
+RUN chmod +x /usr/local/bin/before-notebook.d/08-openclaw-camera-plugin.sh
 
 RUN cat > /usr/local/bin/before-notebook.d/10-openclaw-gateway.sh <<'HOOK'
 #!/usr/bin/env bash
