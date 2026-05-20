@@ -31,7 +31,9 @@ RUN mamba install --yes -c conda-forge "nodejs>=24" \
 
 RUN npm install -g pnpm@latest \
     && npm install -g "openclaw@${OPENCLAW_VERSION}" \
-    && openclaw --version
+    && npm install -g @openai/codex \
+    && openclaw --version \
+    && codex --version
 
 RUN install -d -o ${NB_UID} -g ${NB_GID} \
         /home/jovyan/.openclaw \
@@ -128,6 +130,41 @@ openclaw plugins install "@openclaw/discord@${CLI_VERSION}" --force --pin
 SCRIPT
 RUN chmod +x /usr/local/bin/openclaw-sync-discord-plugin.sh
 
+# Bake the @openclaw/codex harness plugin sync helper.
+# The codex harness is the default agent runner; without this plugin every
+# inbound Discord/IM message fails with "Requested agent harness 'codex' is
+# not registered." Installed from ClawHub into the persisted state dir.
+RUN cat > /usr/local/bin/openclaw-sync-codex-plugin.sh <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v openclaw >/dev/null 2>&1; then
+    echo "[openclaw] CLI not found; skipping codex plugin sync"
+    exit 0
+fi
+
+CLI_VERSION="$(openclaw --version 2>/dev/null | awk '{print $2}')"
+if [[ -z "${CLI_VERSION:-}" ]]; then
+    echo "[openclaw] could not determine CLI version; skipping codex plugin sync"
+    exit 0
+fi
+
+PLUGIN_PKG="${OPENCLAW_HOME:-/home/jovyan/.openclaw}/.openclaw/extensions/codex/package.json"
+INSTALLED_VERSION=""
+if [[ -f "$PLUGIN_PKG" ]]; then
+    INSTALLED_VERSION="$(jq -r .version "$PLUGIN_PKG" 2>/dev/null || true)"
+fi
+
+if [[ "$INSTALLED_VERSION" == "$CLI_VERSION" ]]; then
+    echo "[openclaw] codex plugin already matches CLI (${CLI_VERSION})"
+    exit 0
+fi
+
+echo "[openclaw] installing @openclaw/codex: installed='${INSTALLED_VERSION:-none}' -> cli='${CLI_VERSION}'"
+openclaw plugins install "clawhub:@openclaw/codex" --force --pin
+SCRIPT
+RUN chmod +x /usr/local/bin/openclaw-sync-codex-plugin.sh
+
 # Bake the env-driven Discord allow-list applier.
 # Reads DISCORD_GUILD_ID, DISCORD_CHANNEL_IDS (comma-separated), and optional
 # DISCORD_REQUIRE_MENTION, and patches openclaw.json so the bot only replies in
@@ -215,6 +252,8 @@ run_as_jovyan() {
 }
 run_as_jovyan /usr/local/bin/openclaw-sync-discord-plugin.sh \
     || echo "[openclaw] discord plugin sync failed; continuing"
+run_as_jovyan /usr/local/bin/openclaw-sync-codex-plugin.sh \
+    || echo "[openclaw] codex plugin sync failed; continuing"
 HOOK
 RUN chmod +x /usr/local/bin/before-notebook.d/05-openclaw-plugins.sh
 
