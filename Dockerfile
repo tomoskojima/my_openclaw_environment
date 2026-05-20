@@ -398,6 +398,8 @@ set -euo pipefail
 
 PLUGIN_SRC="/opt/openclaw-plugins/openclaw-camera"
 PLUGIN_ID="openclaw-camera"
+TOOL_NAME="capture_camera_frame"
+CFG_FILE="${OPENCLAW_HOME:-/home/jovyan/.openclaw}/.openclaw/openclaw.json"
 
 if [[ ! -f "$PLUGIN_SRC/index.js" ]]; then
     echo "[openclaw] camera plugin source missing at $PLUGIN_SRC; skipping"
@@ -409,19 +411,37 @@ if ! command -v openclaw >/dev/null 2>&1; then
     exit 0
 fi
 
+needs_install=true
 if openclaw plugins inspect "$PLUGIN_ID" >/dev/null 2>&1; then
     CURRENT_SRC="$(openclaw plugins inspect "$PLUGIN_ID" 2>/dev/null | awk -F': ' '/^Source path:/ {print $2; exit}')"
     if [[ "$CURRENT_SRC" == "$PLUGIN_SRC" ]]; then
         echo "[openclaw] camera plugin already registered from $PLUGIN_SRC"
-        exit 0
+        needs_install=false
     fi
 fi
 
-echo "[openclaw] linking camera plugin from $PLUGIN_SRC"
-# The plugin spawns ffmpeg via child_process, which trips the unsafe-pattern
-# guard. The plugin source is shipped inside this image (not from the network),
-# so we explicitly bypass the guard.
-openclaw plugins install --link --force --dangerously-force-unsafe-install "$PLUGIN_SRC"
+if [[ "$needs_install" == "true" ]]; then
+    echo "[openclaw] linking camera plugin from $PLUGIN_SRC"
+    # The plugin spawns ffmpeg via child_process, which trips the unsafe-pattern
+    # guard. The plugin source is shipped inside this image (not from the network),
+    # so we explicitly bypass the guard.
+    openclaw plugins install --link --force --dangerously-force-unsafe-install "$PLUGIN_SRC"
+fi
+
+# Plugin tools are gated by the agent tool profile. The default "coding" profile
+# does NOT expose our custom tool, so the agent (codex harness) refuses to call
+# it. Merge the tool name into tools.alsoAllow so the harness sees it.
+if [[ -f "$CFG_FILE" ]] && command -v jq >/dev/null 2>&1; then
+    if jq -e --arg t "$TOOL_NAME" '.tools.alsoAllow // [] | index($t)' "$CFG_FILE" >/dev/null 2>&1; then
+        echo "[openclaw] $TOOL_NAME already in tools.alsoAllow"
+    else
+        echo "[openclaw] adding $TOOL_NAME to tools.alsoAllow"
+        EXISTING="$(jq -c '.tools.alsoAllow // []' "$CFG_FILE")"
+        UPDATED="$(jq -nc --argjson cur "$EXISTING" --arg t "$TOOL_NAME" '$cur + [$t] | unique')"
+        printf '{"tools":{"alsoAllow":%s}}' "$UPDATED" \
+            | openclaw config patch --stdin --replace-path tools.alsoAllow
+    fi
+fi
 SCRIPT
 RUN chmod +x /usr/local/bin/openclaw-install-camera-plugin.sh
 
