@@ -231,6 +231,45 @@ printf '%s' "$PATCH" | openclaw config patch --stdin --replace-path "channels.di
 SCRIPT
 RUN chmod +x /usr/local/bin/openclaw-apply-discord-allowlist.sh
 
+# Bake the workspace-unification helper.
+# Points OpenClaw's default agent workspace at the same directory that
+# JupyterLab uses (/home/jovyan/work, bind-mounted from host ./work) so files
+# created/edited by the agent show up in JupyterLab and vice versa.
+# Path is overridable via OPENCLAW_WORKSPACE env var.
+RUN cat > /usr/local/bin/openclaw-apply-workspace.sh <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+
+WORKSPACE="${OPENCLAW_WORKSPACE:-/home/jovyan/work}"
+
+if ! command -v openclaw >/dev/null 2>&1; then
+    echo "[openclaw] CLI not on PATH; skipping workspace patch"
+    exit 0
+fi
+
+CFG_FILE="${OPENCLAW_HOME:-/home/jovyan/.openclaw}/.openclaw/openclaw.json"
+if [[ ! -f "$CFG_FILE" ]]; then
+    echo "[openclaw] $CFG_FILE not found; run 'openclaw configure' once before unifying workspace"
+    exit 0
+fi
+
+if [[ ! -d "$WORKSPACE" ]]; then
+    echo "[openclaw] workspace directory $WORKSPACE missing; creating"
+    mkdir -p "$WORKSPACE"
+fi
+
+CURRENT="$(jq -r '.agents.defaults.workspace // empty' "$CFG_FILE" 2>/dev/null || true)"
+if [[ "$CURRENT" == "$WORKSPACE" ]]; then
+    echo "[openclaw] agents.defaults.workspace already = $WORKSPACE"
+    exit 0
+fi
+
+echo "[openclaw] setting agents.defaults.workspace: '${CURRENT:-unset}' -> '$WORKSPACE'"
+jq -n --arg ws "$WORKSPACE" '{agents:{defaults:{workspace:$ws}}}' \
+    | openclaw config patch --stdin
+SCRIPT
+RUN chmod +x /usr/local/bin/openclaw-apply-workspace.sh
+
 # Register Jupyter pre-start hooks. Numeric prefixes set execution order:
 #   05-  sync discord plugin to CLI version
 #   06-  apply env-driven Discord allow-list to openclaw.json
@@ -272,6 +311,21 @@ run_as_jovyan /usr/local/bin/openclaw-apply-discord-allowlist.sh \
     || echo "[openclaw] discord allow-list apply failed; continuing"
 HOOK
 RUN chmod +x /usr/local/bin/before-notebook.d/06-openclaw-discord-config.sh
+
+RUN cat > /usr/local/bin/before-notebook.d/07-openclaw-workspace.sh <<'HOOK'
+#!/usr/bin/env bash
+# Unify the OpenClaw agent workspace with the Jupyter workspace bind mount.
+run_as_jovyan() {
+    if [[ "$(id -u)" == "0" ]]; then
+        runuser -u jovyan --preserve-environment -- "$@"
+    else
+        "$@"
+    fi
+}
+run_as_jovyan /usr/local/bin/openclaw-apply-workspace.sh \
+    || echo "[openclaw] workspace apply failed; continuing"
+HOOK
+RUN chmod +x /usr/local/bin/before-notebook.d/07-openclaw-workspace.sh
 
 RUN cat > /usr/local/bin/before-notebook.d/10-openclaw-gateway.sh <<'HOOK'
 #!/usr/bin/env bash

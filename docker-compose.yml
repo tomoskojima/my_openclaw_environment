@@ -13,6 +13,7 @@ services:
       - JUPYTER_ENABLE_LAB=yes
       - JUPYTER_TOKEN=${JUPYTER_TOKEN:-openclaw}
       - OPENCLAW_HOME=/home/jovyan/.openclaw
+      - OPENCLAW_WORKSPACE=${OPENCLAW_WORKSPACE:-/home/jovyan/work}
       - GRANT_SUDO=yes
       - CHOWN_HOME=yes
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
