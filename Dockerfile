@@ -406,7 +406,12 @@ set -euo pipefail
 
 PLUGIN_SRC="/opt/openclaw-plugins/openclaw-camera"
 PLUGIN_ID="openclaw-camera"
-TOOL_NAME="capture_camera_frame"
+# Tool entries that must be merged into tools.alsoAllow for the agent to
+# (a) call our custom camera tool and (b) reply to Discord with attachments.
+# group:messaging unlocks the built-in `message` tool family (send, reply,
+# sendAttachment, upload-file, thread-reply) that the default "coding"
+# profile suppresses.
+TOOL_ALLOWLIST_ADDITIONS=("capture_camera_frame" "group:messaging")
 CFG_FILE="${OPENCLAW_HOME:-/home/jovyan/.openclaw}/.openclaw/openclaw.json"
 
 if [[ ! -f "$PLUGIN_SRC/index.js" ]]; then
@@ -436,16 +441,19 @@ if [[ "$needs_install" == "true" ]]; then
     openclaw plugins install --link --force --dangerously-force-unsafe-install "$PLUGIN_SRC"
 fi
 
-# Plugin tools are gated by the agent tool profile. The default "coding" profile
-# does NOT expose our custom tool, so the agent (codex harness) refuses to call
-# it. Merge the tool name into tools.alsoAllow so the harness sees it.
+# Plugin tools and built-in messaging tools are gated by the agent tool
+# profile. The default "coding" profile exposes neither our custom camera
+# tool nor the Discord attachment/reply tools, so merge them into
+# tools.alsoAllow if missing.
 if [[ -f "$CFG_FILE" ]] && command -v jq >/dev/null 2>&1; then
-    if jq -e --arg t "$TOOL_NAME" '.tools.alsoAllow // [] | index($t)' "$CFG_FILE" >/dev/null 2>&1; then
-        echo "[openclaw] $TOOL_NAME already in tools.alsoAllow"
+    EXISTING="$(jq -c '.tools.alsoAllow // []' "$CFG_FILE")"
+    DESIRED="$(printf '%s\n' "${TOOL_ALLOWLIST_ADDITIONS[@]}" | jq -R . | jq -sc .)"
+    MISSING="$(jq -nc --argjson cur "$EXISTING" --argjson want "$DESIRED" '$want - $cur')"
+    if [[ "$MISSING" == "[]" ]]; then
+        echo "[openclaw] tools.alsoAllow already contains: ${TOOL_ALLOWLIST_ADDITIONS[*]}"
     else
-        echo "[openclaw] adding $TOOL_NAME to tools.alsoAllow"
-        EXISTING="$(jq -c '.tools.alsoAllow // []' "$CFG_FILE")"
-        UPDATED="$(jq -nc --argjson cur "$EXISTING" --arg t "$TOOL_NAME" '$cur + [$t] | unique')"
+        echo "[openclaw] adding to tools.alsoAllow: $MISSING"
+        UPDATED="$(jq -nc --argjson cur "$EXISTING" --argjson add "$MISSING" '($cur + $add) | unique')"
         printf '{"tools":{"alsoAllow":%s}}' "$UPDATED" \
             | openclaw config patch --stdin --replace-path tools.alsoAllow
     fi
