@@ -26,6 +26,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN /opt/conda/bin/pip install --no-cache-dir opencv-python-headless
 
+# Put jovyan in the host's "video" group inside /etc/group so any subprocess
+# that drops privileges via sudo/su (e.g. the codex harness sandbox) still
+# inherits permission to read /dev/video*. The docker-compose `group_add: 44`
+# only affects the container's initial process; supplementary groups are reset
+# on user switch unless the group membership is recorded in /etc/group itself.
+# (Debian/Ubuntu/Raspberry Pi OS all ship the "video" group with GID 44.)
+RUN usermod -aG video ${NB_USER}
+
 RUN mamba install --yes -c conda-forge "nodejs>=24" \
     && mamba clean --all -f -y \
     && fix-permissions "${CONDA_DIR}" \
